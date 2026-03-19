@@ -29,11 +29,18 @@ PluginSettings {
         description: "Allow your device to be discovered and send files"
         defaultValue: true
     }
+    
+    ToggleSetting {
+        settingKey: "autoAccept"
+        label: "Auto-Accept Transfers"
+        description: "Automatically accept files sent from any nearby device without asking"
+        defaultValue: false
+    }
 
     StringSetting {
         settingKey: "deviceName"
         label: "Device Name"
-        description: "How your device appears to others"
+        description: "How your device appears to others (Not fully supported by daemon yet)"
         placeholder: "DankLinux PC"
         defaultValue: "DankLinux PC"
     }

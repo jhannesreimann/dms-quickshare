@@ -13,6 +13,7 @@ PluginComponent {
     
     // Default properties and state
     property bool isEnabled: pluginData.isEnabled ?? true
+    property bool autoAccept: pluginData.autoAccept ?? false
     property bool isScanning: false
     property var mockDevices: []
     property var pendingTransfers: [] // Queue of incoming transfers waiting for accept/reject
@@ -118,8 +119,58 @@ PluginComponent {
                         const deviceName = response.result.arguments[1];
                         const pin = response.result.arguments[2];
                         
-                        ToastService.showInfo("Quick Share", deviceName + " wants to send a file (PIN: " + pin + "). Open Quick Share to accept.");
+                        // Check if Auto-Accept is enabled
+                        // Fetch fresh state from pluginData to make sure we have latest setting
+                        const autoAcceptEnabled = root.pluginData.autoAccept ?? root.autoAccept;
                         
+                        if (autoAcceptEnabled) {
+                            ToastService.showInfo("Quick Share", "Auto-accepting transfer from " + deviceName);
+                            Quickshell.execDetached([
+                                "dbus-send", "--session", "--type=method_call", 
+                                "--dest=org.danklinux.QuickShare", 
+                                "/org/danklinux/QuickShare", 
+                                "org.danklinux.QuickShare.AcceptTransfer", 
+                                "string:" + id
+                            ]);
+                            return; // Stop here, don't show prompt
+                        }
+                        
+                        // Normal flow: Show notification with actions
+                        // Using native notify-send with action buttons instead of just a Toast
+                        let notifyCmd = [
+                            "notify-send", 
+                            "-a", "Quick Share",
+                            "-i", "document-send",
+                            "--action=accept=Accept",
+                            "--action=reject=Reject",
+                            "--wait", // Wait for user interaction
+                            "Incoming File", 
+                            `${deviceName} wants to send you a file (PIN: ${pin}).`
+                        ];
+
+                        Quickshell.exec(notifyCmd, function(out, err, code) {
+                            if (code === 0 && out.trim() === "accept") {
+                                Quickshell.execDetached([
+                                    "dbus-send", "--session", "--type=method_call", 
+                                    "--dest=org.danklinux.QuickShare", 
+                                    "/org/danklinux/QuickShare", 
+                                    "org.danklinux.QuickShare.AcceptTransfer", 
+                                    "string:" + id
+                                ]);
+                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
+                            } else if (code === 0 && out.trim() === "reject") {
+                                Quickshell.execDetached([
+                                    "dbus-send", "--session", "--type=method_call", 
+                                    "--dest=org.danklinux.QuickShare", 
+                                    "/org/danklinux/QuickShare", 
+                                    "org.danklinux.QuickShare.RejectTransfer", 
+                                    "string:" + id
+                                ]);
+                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
+                            }
+                        });
+                        
+                        // Add to UI queue as fallback if they ignore the native notification
                         let newTransfers = root.pendingTransfers.slice();
                         newTransfers.push({
                             id: id,
@@ -172,7 +223,6 @@ PluginComponent {
                             root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
                             root.activeTransfers = root.activeTransfers.filter(t => t.id !== id);
                         } else if (state === "Rejected" || state === "Cancelled" || state === "Disconnected") {
-                            // Only show error if it was actually transferring or pending
                             if (root.pendingTransfers.some(t => t.id === id) || root.activeTransfers.some(t => t.id === id)) {
                                 ToastService.showError("Quick Share", "Transfer " + state.toLowerCase());
                             }
@@ -189,6 +239,38 @@ PluginComponent {
         // Stop daemon when plugin unloads if we started it
         if (daemonProcess.running) {
             daemonProcess.running = false;
+        }
+    }
+
+    // DropArea for full-screen dragging
+    DropArea {
+        anchors.fill: parent
+        onDropped: (drop) => {
+            if (drop.hasUrls) {
+                // Parse URLs (strip file://)
+                const files = drop.urls.map(url => url.toString().replace("file://", ""));
+                if (files.length > 0) {
+                    root.pluginService.savePluginState(root.pluginId, "selectedFiles", files);
+                    ToastService.showInfo("Quick Share", files.length + " file(s) dropped. Tap a device to send.");
+                    drop.accept();
+                    
+                    // Auto trigger scan if we just dropped something
+                    if (!root.isScanning) {
+                        root.isScanning = true;
+                        root.mockDevices = [];
+                        Quickshell.execDetached([
+                            "dbus-send", "--session", "--type=method_call", 
+                            "--dest=org.danklinux.QuickShare", "/org/danklinux/QuickShare", 
+                            "org.danklinux.QuickShare.StartDiscovery"
+                        ]);
+
+                        Timer {
+                            interval: 15000; running: true; repeat: false
+                            onTriggered: root.isScanning = false
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -233,7 +315,7 @@ PluginComponent {
             id: popoutColumn
 
             headerText: "Quick Share"
-            detailsText: root.daemonRunning ? "Share with nearby devices" : "Daemon not running! Please install dms-quickshare-daemon."
+            detailsText: root.daemonRunning ? "Share with nearby devices (Drag & Drop files here)" : "Daemon not running! Please install dms-quickshare-daemon."
             showCloseButton: true
 
             Item {
@@ -495,7 +577,7 @@ PluginComponent {
                                 onClicked: {
                                     const selectedFiles = root.pluginService.loadPluginState(root.pluginId, "selectedFiles", []);
                                     if (!selectedFiles || selectedFiles.length === 0) {
-                                        ToastService.showError("Quick Share", "Please select a file first using the 'Select File' button.");
+                                        ToastService.showError("Quick Share", "Please select a file first using the 'Select File' button or drag and drop a file.");
                                         return;
                                     }
                                     

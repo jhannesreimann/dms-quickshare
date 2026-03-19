@@ -18,9 +18,11 @@ We are building a standalone third-party plugin for DankMaterialShell (DMS) that
 ## What Works So Far
 - **D-Bus Skeleton:** The QML frontend successfully subscribes to signals and triggers methods. The Rust daemon successfully registers the D-Bus interface.
 - **Discovery:** Triggering a scan from QML invokes `rqs_lib` discovery, which emits a signal back to QML to populate the UI list.
-- **UI Logic:** Selecting files (via `zenity`) and displaying pending transfers.
 - **File Reception (Rust):** The daemon explicitly tells `rqs_lib` to save files to the user's `~/Downloads` directory (using the `dirs` crate).
 - **Transfer Progress (QML + Rust):** The daemon extracts `ack_bytes` and `total_bytes` from the `rqs_lib` internal state and emits them over D-Bus. The QML frontend listens for `TransferProgress` and renders an active progress bar with megabyte counts.
+- **Auto-Accept:** QML parses the Settings for an `autoAccept` flag. If true, it automatically fires `AcceptTransfer` over D-Bus instead of waiting for user interaction.
+- **Native Notifications:** Instead of just a QML Toast, incoming transfers fire a native `notify-send` with Action buttons (`Accept` / `Reject`), allowing interaction without opening the DankBar.
+- **Drag and Drop:** The main QML file wraps a `DropArea`, allowing users to drag and drop files onto the widget to trigger an automatic scan and queue the files for sending.
 
 ## What Needs To Be Implemented Next
 1. **Bluetooth LE (BLE) / mDNS Dependencies:**

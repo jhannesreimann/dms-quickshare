@@ -3,10 +3,11 @@
 A native Quick Share (Nearby Share) integration for DankMaterialShell. It allows you to seamlessly send and receive files between your Linux PC and Android devices.
 
 ## Features
-- **Send Files:** Select multiple files and push them to your Android device with a single click.
-- **Receive Files:** Get an instant prompt in your DankBar when a nearby device wants to send you a file.
-- **Native D-Bus Daemon:** Runs a lightweight Rust background process built on top of `rquickshare` for reliable, low-latency device discovery and transfers.
-- **Control Center Integration:** Quickly toggle your PC's discoverability from the Control Center.
+- **Send Files:** Select multiple files or just Drag & Drop them onto the Quick Share icon to push them to your Android device with a single click.
+- **Receive Files:** Get an interactive native desktop notification when a nearby device wants to send you a file (Accept/Reject directly from the notification).
+- **Auto-Accept:** Toggle "Auto-Accept Transfers" in the settings to automatically receive files from known devices without clicking anything.
+- **Progress Tracking:** See live upload/download progress bars with exact megabyte counts inside the DankBar widget.
+- **Native D-Bus Daemon:** Runs a lightweight Rust background process built on top of `rquickshare` for reliable, low-latency device discovery and transfers. Files are automatically saved to your `~/Downloads` folder.
 
 ## Architecture
 
@@ -42,7 +43,7 @@ To add this plugin to your DMS environment using the Plugin Browser:
     "repo": "https://github.com/yourname/dms-quickshare",
     "author": "noaa",
     "description": "Send and receive files seamlessly across nearby devices using Quick Share.",
-    "dependencies": ["dms-quickshare-daemon", "zenity"],
+    "dependencies": ["dms-quickshare-daemon", "zenity", "libnotify"],
     "compositors": ["any"],
     "distro": ["any"],
     "screenshot": "https://raw.githubusercontent.com/yourname/dms-quickshare/main/screenshot.png"

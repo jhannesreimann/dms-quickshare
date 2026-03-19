@@ -1,0 +1,12 @@
+[package]
+name = "dms-quickshare-daemon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rqs_lib = { git = "https://github.com/Martichou/rquickshare" }
+tokio = { version = "1", features = ["full"] }
+zbus = "4.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"

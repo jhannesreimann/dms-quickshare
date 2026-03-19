@@ -1,0 +1,21 @@
+{
+  "id": "quickshare",
+  "name": "Quick Share",
+  "description": "Send and receive files seamlessly across nearby devices using Quick Share.",
+  "version": "1.0.0",
+  "author": "noaa",
+  "icon": "share",
+  "type": "widget",
+  "capabilities": [
+    "dankbar-widget",
+    "control-center"
+  ],
+  "component": "./DankQuickShare.qml",
+  "settings": "./Settings.qml",
+  "permissions": [
+    "settings_read",
+    "settings_write",
+    "process",
+    "network"
+  ]
+}

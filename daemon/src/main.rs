@@ -1,170 +1,50 @@
 use anyhow::Result;
 use log::{error, info, trace};
-use rqs_lib::{
-    channel::{ChannelAction, ChannelDirection, ChannelMessage, TransferType},
-    EndpointInfo, SendInfo, Visibility, RQS, OutboundPayload,
-};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc};
-use zbus::{connection::Builder, interface, SignalContext};
-use std::path::PathBuf;
+use rqs_lib::channel::{ChannelDirection, TransferType};
+use std::sync::Arc;
+use zbus::connection::Builder;
 
-// The state our D-Bus interface will manipulate
-struct QuickShareDaemon {
-    rqs: Arc<Mutex<RQS>>,
-    sender_file: mpsc::Sender<SendInfo>,
-}
+mod core;
+mod dbus;
 
-#[interface(name = "org.danklinux.QuickShare")]
-impl QuickShareDaemon {
-    async fn set_visibility(&self, visible: bool) -> zbus::fdo::Result<()> {
-        let visibility = if visible {
-            Visibility::Visible
-        } else {
-            Visibility::Invisible
-        };
-        
-        let rqs = self.rqs.lock().unwrap();
-        if let Err(e) = rqs.visibility_sender.lock().unwrap().send(visibility) {
-            error!("Failed to change visibility: {}", e);
-            return Err(zbus::fdo::Error::Failed("Failed to change visibility".into()));
-        }
-        
-        info!("Visibility changed to: {:?}", visibility);
-        Ok(())
-    }
-
-    async fn start_discovery(&self, #[zbus(signal_context)] ctxt: SignalContext<'_>) -> zbus::fdo::Result<()> {
-        let mut rqs = self.rqs.lock().unwrap();
-        
-        let (dch_sender, mut dch_receiver) = broadcast::channel::<EndpointInfo>(50);
-        
-        if let Err(e) = rqs.discovery(dch_sender) {
-            error!("Failed to start discovery: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to start discovery: {}", e)));
-        }
-        
-        let ctxt = ctxt.into_owned();
-        tokio::spawn(async move {
-            while let Ok(endpoint) = dch_receiver.recv().await {
-                let name = endpoint.name.unwrap_or_else(|| "Unknown Device".to_string());
-                let ip = endpoint.ip.unwrap_or_else(|| "".to_string());
-                info!("Discovered device: {} ({}) at {}", name, endpoint.id, ip);
-                if let Err(e) = QuickShareDaemon::device_discovered(&ctxt, &endpoint.id, &name, &ip).await {
-                    error!("Failed to emit device_discovered signal: {}", e);
-                }
-            }
-        });
-        
-        info!("Started discovery for Quick Share devices");
-        Ok(())
-    }
-
-    async fn send_files(&self, device_id: String, device_name: String, ip_addr: String, files: Vec<String>) -> zbus::fdo::Result<()> {
-        info!("Request to send {} files to {}", files.len(), device_name);
-        
-        let send_info = SendInfo {
-            id: device_id,
-            name: device_name,
-            addr: ip_addr,
-            ob: OutboundPayload::Files(files),
-        };
-
-        if let Err(e) = self.sender_file.send(send_info).await {
-            error!("Failed to queue files for sending: {}", e);
-            return Err(zbus::fdo::Error::Failed(format!("Failed to send files: {}", e)));
-        }
-
-        Ok(())
-    }
-
-    async fn accept_transfer(&self, transfer_id: String) -> zbus::fdo::Result<()> {
-        info!("Accepting transfer {}", transfer_id);
-        let rqs = self.rqs.lock().unwrap();
-        
-        let msg = ChannelMessage {
-            id: transfer_id,
-            direction: ChannelDirection::FrontToLib,
-            action: Some(ChannelAction::AcceptTransfer),
-            rtype: None,
-            state: None,
-            meta: None,
-        };
-
-        if let Err(e) = rqs.message_sender.send(msg) {
-            error!("Failed to accept transfer: {}", e);
-            return Err(zbus::fdo::Error::Failed("Failed to send accept message".into()));
-        }
-
-        Ok(())
-    }
-
-    async fn reject_transfer(&self, transfer_id: String) -> zbus::fdo::Result<()> {
-        info!("Rejecting transfer {}", transfer_id);
-        let rqs = self.rqs.lock().unwrap();
-        
-        let msg = ChannelMessage {
-            id: transfer_id,
-            direction: ChannelDirection::FrontToLib,
-            action: Some(ChannelAction::RejectTransfer),
-            rtype: None,
-            state: None,
-            meta: None,
-        };
-
-        if let Err(e) = rqs.message_sender.send(msg) {
-            error!("Failed to reject transfer: {}", e);
-            return Err(zbus::fdo::Error::Failed("Failed to send reject message".into()));
-        }
-
-        Ok(())
-    }
-
-    #[zbus(signal)]
-    async fn device_discovered(ctxt: &SignalContext<'_>, id: &str, name: &str, ip: &str) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn transfer_requested(ctxt: &SignalContext<'_>, id: &str, device_name: &str, pin: &str) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    async fn transfer_progress(ctxt: &SignalContext<'_>, id: &str, state: &str, bytes_transferred: u64, total_bytes: u64) -> zbus::Result<()>;
-}
+use crate::core::QuickShareCore;
+use crate::dbus::QuickShareDBus;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     info!("Starting DMS Quick Share Daemon");
 
-    // Set default download path to XDG_DOWNLOAD_DIR or fallback to ~/Downloads
-    let download_dir = dirs::download_dir().unwrap_or_else(|| {
-        dirs::home_dir().map(|h| h.join("Downloads")).unwrap_or_else(|| PathBuf::from("/tmp"))
-    });
-    info!("Incoming files will be saved to: {:?}", download_dir);
-
-    // Initialize RQS with the custom download path
-    let mut rqs = RQS::new(Visibility::Invisible, None, Some(download_dir));
+    // Initialize core and get message receiver
+    let (core, mut msg_receiver) = match QuickShareCore::new().await {
+        Ok((c, r)) => (c, r),
+        Err(e) => {
+            error!("Failed to initialize QuickShareCore: {}", e);
+            return Err(e);
+        }
+    };
     
-    // The channel we listen on for incoming messages from the lib (like transfer requests)
-    let mut msg_receiver = rqs.message_sender.subscribe();
-    
-    let (sender_file, _ble_receiver) = rqs.run().await?;
-    let rqs = Arc::new(Mutex::new(rqs));
+    let core = Arc::new(core);
 
-    let daemon = QuickShareDaemon {
-        rqs: Arc::clone(&rqs),
-        sender_file,
+    let daemon = QuickShareDBus {
+        core: Arc::clone(&core),
     };
 
-    let conn = Builder::session()?
-        .name("org.danklinux.QuickShare")?
-        .serve_at("/org/danklinux/QuickShare", daemon)?
-        .build()
-        .await?;
+    let conn = match Builder::session() {
+        Ok(builder) => builder,
+        Err(e) => {
+            error!("Failed to connect to D-Bus session: {}", e);
+            return Err(e.into());
+        }
+    }
+    .name("org.danklinux.QuickShare")?
+    .serve_at("/org/danklinux/QuickShare", daemon)?
+    .build()
+    .await?;
 
     info!("D-Bus interface registered on org.danklinux.QuickShare");
     
-    // Zbus 4.0 uses interface_ref directly from the object server connection
-    let iface_ref = conn.object_server().interface::<_, QuickShareDaemon>("/org/danklinux/QuickShare").await?;
+    let iface_ref = conn.object_server().interface::<_, QuickShareDBus>("/org/danklinux/QuickShare").await?;
     let signal_context = iface_ref.signal_context().clone().into_owned();
 
     // Background task to process events from the rqs library
@@ -173,7 +53,6 @@ async fn main() -> Result<()> {
             if msg.direction == ChannelDirection::LibToFront {
                 let is_inbound = msg.rtype == Some(TransferType::Inbound);
                 
-                // Extract progress info if available
                 let mut total_bytes = 0;
                 let mut ack_bytes = 0;
                 if let Some(ref meta) = msg.meta {
@@ -185,10 +64,8 @@ async fn main() -> Result<()> {
                     let state_str = format!("{:?}", state);
                     trace!("Transfer {} state changed: {}", msg.id, state_str);
                     
-                    // Always emit progress update so UI can update progress bars
-                    let _ = QuickShareDaemon::transfer_progress(&signal_context, &msg.id, &state_str, ack_bytes, total_bytes).await;
+                    let _ = QuickShareDBus::transfer_progress(&signal_context, &msg.id, &state_str, ack_bytes, total_bytes).await;
 
-                    // If it's a new inbound request waiting for acceptance
                     if is_inbound && state_str == "WaitingForUserConsent" {
                         let device_name = msg.meta.as_ref()
                             .and_then(|m| m.source.as_ref())
@@ -200,7 +77,7 @@ async fn main() -> Result<()> {
                             .unwrap_or_else(|| "".to_string());
 
                         info!("Incoming transfer request from {} (PIN: {})", device_name, pin);
-                        let _ = QuickShareDaemon::transfer_requested(&signal_context, &msg.id, &device_name, &pin).await;
+                        let _ = QuickShareDBus::transfer_requested(&signal_context, &msg.id, &device_name, &pin).await;
                     }
                 }
             }

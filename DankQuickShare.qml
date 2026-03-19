@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Layouts
 import qs.Common
 import qs.Services
 import qs.Widgets
@@ -6,6 +7,8 @@ import qs.Modules.Plugins
 import qs.Modals.FileBrowser
 import Quickshell
 import Quickshell.Io
+import "./services"
+import "./components"
 
 PluginComponent {
     id: root
@@ -15,16 +18,16 @@ PluginComponent {
     // Default properties and state
     property bool isEnabled: pluginData.isEnabled ?? true
     property bool autoAccept: pluginData.autoAccept ?? false
-    property bool isScanning: false
-    property var mockDevices: []
-    property var pendingTransfers: [] // Queue of incoming transfers waiting for accept/reject
-    property var activeTransfers: [] // Ongoing transfers with progress
-    property bool daemonRunning: false
 
+    // State lists. Now using ListModel for better performance
+    property ListModel mockDevicesModel: ListModel {}
+    property ListModel pendingTransfersModel: ListModel {}
+    property ListModel activeTransfersModel: ListModel {}
+    
     // Control Center capability
     ccWidgetIcon: isEnabled ? "share" : "share"
     ccWidgetPrimaryText: "Quick Share"
-    ccWidgetSecondaryText: isEnabled ? (isScanning ? "Scanning..." : (daemonRunning ? "Active" : "Daemon stopped")) : "Inactive"
+    ccWidgetSecondaryText: isEnabled ? (QuickShareService.isScanning ? "Scanning..." : (QuickShareService.available ? "Active" : "Daemon stopped")) : "Inactive"
     ccWidgetIsActive: isEnabled
 
     // Daemon background process
@@ -43,14 +46,14 @@ PluginComponent {
 
         onExited: exitCode => {
             console.log("QuickShare Daemon exited with code:", exitCode);
-            root.daemonRunning = false;
+            QuickShareService.available = false;
         }
         
         onStarted: {
             console.log("QuickShare Daemon started.");
-            root.daemonRunning = true;
+            QuickShareService.available = true;
             // Initially set visibility based on settings
-            Quickshell.execDetached(["dbus-send", "--session", "--type=method_call", "--dest=org.danklinux.QuickShare", "/org/danklinux/QuickShare", "org.danklinux.QuickShare.SetVisibility", "boolean:" + (root.isEnabled ? "true" : "false")])
+            QuickShareService.setVisibility(root.isEnabled);
         }
     }
 
@@ -59,185 +62,135 @@ PluginComponent {
         if (pluginService) {
             pluginService.savePluginData(pluginId, "isEnabled", isEnabled)
         }
-        
-        if (root.daemonRunning) {
-            Quickshell.execDetached(["dbus-send", "--session", "--type=method_call", "--dest=org.danklinux.QuickShare", "/org/danklinux/QuickShare", "org.danklinux.QuickShare.SetVisibility", "boolean:" + (isEnabled ? "true" : "false")])
-        }
+        QuickShareService.setVisibility(isEnabled);
     }
 
     // Set up D-Bus subscriptions when component is created
     Component.onCompleted: {
         // Start daemon if not running
-        Quickshell.exec(["pgrep", "-f", "dms-quickshare-daemon"], function(out, err, code) {
-            if (code !== 0) {
+        QuickShareService.checkDaemon((isRunning) => {
+            if (!isRunning) {
                 console.log("Daemon not running. Starting it...");
                 daemonProcess.running = true;
-            } else {
-                console.log("Daemon already running.");
-                root.daemonRunning = true;
             }
         });
+    }
+    
+    Connections {
+        target: QuickShareService
+        
+        function onDeviceDiscovered(id, name, ip) {
+            let exists = false;
+            for (let i = 0; i < root.mockDevicesModel.count; ++i) {
+                if (root.mockDevicesModel.get(i).id === id) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                root.mockDevicesModel.append({
+                    id: id,
+                    name: name,
+                    ip: ip,
+                    type: "phone"
+                });
+            }
+        }
+        
+        function onTransferRequested(id, deviceName, pin) {
+            const autoAcceptEnabled = root.pluginData.autoAccept ?? root.autoAccept;
+            
+            if (autoAcceptEnabled) {
+                ToastService.showInfo("Quick Share", "Auto-accepting transfer from " + deviceName);
+                QuickShareService.acceptTransfer(id);
+                return;
+            }
+            
+            let notifyCmd = [
+                "notify-send", 
+                "-a", "Quick Share",
+                "-i", "document-send",
+                "--action=accept=Accept",
+                "--action=reject=Reject",
+                "--wait", 
+                "Incoming File", 
+                `${deviceName} wants to send you a file (PIN: ${pin}).`
+            ];
 
-        if (DMSService) {
-            // Subscription: Device found
-            DMSService.dbusSubscribe(
-                "session", 
-                "org.danklinux.QuickShare", 
-                "/org/danklinux/QuickShare", 
-                "org.danklinux.QuickShare", 
-                "DeviceDiscovered", 
-                (response) => {
-                    if (response && response.result) {
-                        const id = response.result.arguments[0];
-                        const name = response.result.arguments[1];
-                        const ip = response.result.arguments[2];
-                        
-                        const exists = root.mockDevices.some(d => d.id === id);
-                        if (!exists) {
-                            let newDevices = root.mockDevices.slice();
-                            newDevices.push({
-                                id: id,
-                                name: name,
-                                ip: ip,
-                                type: "phone"
-                            });
-                            root.mockDevices = newDevices;
-                        }
+            Quickshell.exec(notifyCmd, function(out, err, code) {
+                if (code === 0 && out.trim() === "accept") {
+                    QuickShareService.acceptTransfer(id);
+                    removePendingTransfer(id);
+                } else if (code === 0 && out.trim() === "reject") {
+                    QuickShareService.rejectTransfer(id);
+                    removePendingTransfer(id);
+                }
+            });
+            
+            root.pendingTransfersModel.append({
+                id: id,
+                deviceName: deviceName,
+                pin: pin
+            });
+        }
+        
+        function onTransferProgress(id, state, bytesAck, bytesTotal) {
+            if (state === "ReceivingFiles" || state === "SendingFiles") {
+                let existingIdx = -1;
+                for (let i = 0; i < root.activeTransfersModel.count; ++i) {
+                    if (root.activeTransfersModel.get(i).id === id) {
+                        existingIdx = i;
+                        break;
                     }
                 }
-            );
-
-            // Subscription: Incoming Transfer Request
-            DMSService.dbusSubscribe(
-                "session", 
-                "org.danklinux.QuickShare", 
-                "/org/danklinux/QuickShare", 
-                "org.danklinux.QuickShare", 
-                "TransferRequested", 
-                (response) => {
-                    if (response && response.result) {
-                        const id = response.result.arguments[0];
-                        const deviceName = response.result.arguments[1];
-                        const pin = response.result.arguments[2];
-                        
-                        // Check if Auto-Accept is enabled
-                        // Fetch fresh state from pluginData to make sure we have latest setting
-                        const autoAcceptEnabled = root.pluginData.autoAccept ?? root.autoAccept;
-                        
-                        if (autoAcceptEnabled) {
-                            ToastService.showInfo("Quick Share", "Auto-accepting transfer from " + deviceName);
-                            Quickshell.execDetached([
-                                "dbus-send", "--session", "--type=method_call", 
-                                "--dest=org.danklinux.QuickShare", 
-                                "/org/danklinux/QuickShare", 
-                                "org.danklinux.QuickShare.AcceptTransfer", 
-                                "string:" + id
-                            ]);
-                            return; // Stop here, don't show prompt
-                        }
-                        
-                        // Normal flow: Show notification with actions
-                        // Using native notify-send with action buttons instead of just a Toast
-                        let notifyCmd = [
-                            "notify-send", 
-                            "-a", "Quick Share",
-                            "-i", "document-send",
-                            "--action=accept=Accept",
-                            "--action=reject=Reject",
-                            "--wait", // Wait for user interaction
-                            "Incoming File", 
-                            `${deviceName} wants to send you a file (PIN: ${pin}).`
-                        ];
-
-                        Quickshell.exec(notifyCmd, function(out, err, code) {
-                            if (code === 0 && out.trim() === "accept") {
-                                Quickshell.execDetached([
-                                    "dbus-send", "--session", "--type=method_call", 
-                                    "--dest=org.danklinux.QuickShare", 
-                                    "/org/danklinux/QuickShare", 
-                                    "org.danklinux.QuickShare.AcceptTransfer", 
-                                    "string:" + id
-                                ]);
-                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
-                            } else if (code === 0 && out.trim() === "reject") {
-                                Quickshell.execDetached([
-                                    "dbus-send", "--session", "--type=method_call", 
-                                    "--dest=org.danklinux.QuickShare", 
-                                    "/org/danklinux/QuickShare", 
-                                    "org.danklinux.QuickShare.RejectTransfer", 
-                                    "string:" + id
-                                ]);
-                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
-                            }
-                        });
-                        
-                        // Add to UI queue as fallback if they ignore the native notification
-                        let newTransfers = root.pendingTransfers.slice();
-                        newTransfers.push({
-                            id: id,
-                            deviceName: deviceName,
-                            pin: pin
-                        });
-                        root.pendingTransfers = newTransfers;
-                    }
+                
+                let progress = bytesTotal > 0 ? (bytesAck / bytesTotal) : 0;
+                let bytesStr = Math.round(bytesAck / 1024 / 1024) + " / " + Math.round(bytesTotal / 1024 / 1024) + " MB";
+                
+                if (existingIdx !== -1) {
+                    root.activeTransfersModel.setProperty(existingIdx, "progress", progress);
+                    root.activeTransfersModel.setProperty(existingIdx, "state", state);
+                    root.activeTransfersModel.setProperty(existingIdx, "bytesStr", bytesStr);
+                } else {
+                    root.activeTransfersModel.append({
+                        id: id,
+                        state: state,
+                        progress: progress,
+                        bytesStr: "Starting..."
+                    });
                 }
-            );
+            }
+            
+            if (state === "Finished") {
+                ToastService.showInfo("Quick Share", "Transfer completed successfully!");
+                removePendingTransfer(id);
+                removeActiveTransfer(id);
+            } else if (state === "Rejected" || state === "Cancelled" || state === "Disconnected") {
+                removePendingTransfer(id);
+                removeActiveTransfer(id);
+            }
+        }
+    }
 
-            // Subscription: Transfer Progress (State updates)
-            DMSService.dbusSubscribe(
-                "session", 
-                "org.danklinux.QuickShare", 
-                "/org/danklinux/QuickShare", 
-                "org.danklinux.QuickShare", 
-                "TransferProgress", 
-                (response) => {
-                    if (response && response.result) {
-                        const id = response.result.arguments[0];
-                        const state = response.result.arguments[1];
-                        const bytesAck = response.result.arguments[2] || 0;
-                        const bytesTotal = response.result.arguments[3] || 0;
-                        
-                        // Manage active transfers
-                        if (state === "ReceivingFiles" || state === "SendingFiles") {
-                            let ongoing = root.activeTransfers.slice();
-                            let existingIdx = ongoing.findIndex(t => t.id === id);
-                            
-                            let progress = bytesTotal > 0 ? (bytesAck / bytesTotal) : 0;
-                            
-                            if (existingIdx !== -1) {
-                                ongoing[existingIdx].progress = progress;
-                                ongoing[existingIdx].state = state;
-                                ongoing[existingIdx].bytesStr = Math.round(bytesAck / 1024 / 1024) + " / " + Math.round(bytesTotal / 1024 / 1024) + " MB";
-                            } else {
-                                ongoing.push({
-                                    id: id,
-                                    state: state,
-                                    progress: progress,
-                                    bytesStr: "Starting..."
-                                });
-                            }
-                            root.activeTransfers = ongoing;
-                        }
-                        
-                        if (state === "Finished") {
-                            ToastService.showInfo("Quick Share", "Transfer completed successfully!");
-                            root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
-                            root.activeTransfers = root.activeTransfers.filter(t => t.id !== id);
-                        } else if (state === "Rejected" || state === "Cancelled" || state === "Disconnected") {
-                            if (root.pendingTransfers.some(t => t.id === id) || root.activeTransfers.some(t => t.id === id)) {
-                                ToastService.showError("Quick Share", "Transfer " + state.toLowerCase());
-                            }
-                            root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
-                            root.activeTransfers = root.activeTransfers.filter(t => t.id !== id);
-                        }
-                    }
-                }
-            );
+    function removePendingTransfer(id) {
+        for (let i = 0; i < root.pendingTransfersModel.count; ++i) {
+            if (root.pendingTransfersModel.get(i).id === id) {
+                root.pendingTransfersModel.remove(i);
+                break;
+            }
+        }
+    }
+    
+    function removeActiveTransfer(id) {
+        for (let i = 0; i < root.activeTransfersModel.count; ++i) {
+            if (root.activeTransfersModel.get(i).id === id) {
+                root.activeTransfersModel.remove(i);
+                break;
+            }
         }
     }
 
     Component.onDestruction: {
-        // Stop daemon when plugin unloads if we started it
         if (daemonProcess.running) {
             daemonProcess.running = false;
         }
@@ -248,27 +201,15 @@ PluginComponent {
         anchors.fill: parent
         onDropped: (drop) => {
             if (drop.hasUrls) {
-                // Parse URLs (strip file://)
                 const files = drop.urls.map(url => url.toString().replace("file://", ""));
                 if (files.length > 0) {
                     root.pluginService.savePluginState(root.pluginId, "selectedFiles", files);
                     ToastService.showInfo("Quick Share", files.length + " file(s) dropped. Tap a device to send.");
                     drop.accept();
                     
-                    // Auto trigger scan if we just dropped something
-                    if (!root.isScanning) {
-                        root.isScanning = true;
-                        root.mockDevices = [];
-                        Quickshell.execDetached([
-                            "dbus-send", "--session", "--type=method_call", 
-                            "--dest=org.danklinux.QuickShare", "/org/danklinux/QuickShare", 
-                            "org.danklinux.QuickShare.StartDiscovery"
-                        ]);
-
-                        Timer {
-                            interval: 15000; running: true; repeat: false
-                            onTriggered: root.isScanning = false
-                        }
+                    if (!QuickShareService.isScanning) {
+                        root.mockDevicesModel.clear();
+                        QuickShareService.startDiscovery();
                     }
                 }
             }
@@ -281,16 +222,16 @@ PluginComponent {
             spacing: Theme.spacingS
 
             DankIcon {
-                name: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? "downloading" : "share"
+                name: (root.pendingTransfersModel.count > 0 || root.activeTransfersModel.count > 0) ? "downloading" : "share"
                 size: root.iconSize
-                color: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
+                color: (root.pendingTransfersModel.count > 0 || root.activeTransfersModel.count > 0) ? Theme.success : (root.isEnabled && QuickShareService.available ? Theme.primary : Theme.surfaceVariantText)
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
-                text: root.activeTransfers.length > 0 ? "Transferring" : (root.pendingTransfers.length > 0 ? "Incoming" : "Share")
+                text: root.activeTransfersModel.count > 0 ? "Transferring" : (root.pendingTransfersModel.count > 0 ? "Incoming" : "Share")
                 font.pixelSize: Theme.fontSizeSmall
-                color: root.isEnabled && root.daemonRunning ? Theme.surfaceText : Theme.surfaceVariantText
+                color: root.isEnabled && QuickShareService.available ? Theme.surfaceText : Theme.surfaceVariantText
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.isEnabled
             }
@@ -302,16 +243,13 @@ PluginComponent {
             spacing: Theme.spacingXS
 
             DankIcon {
-                name: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? "downloading" : "share"
+                name: (root.pendingTransfersModel.count > 0 || root.activeTransfersModel.count > 0) ? "downloading" : "share"
                 size: root.iconSize
-                color: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
+                color: (root.pendingTransfersModel.count > 0 || root.activeTransfersModel.count > 0) ? Theme.success : (root.isEnabled && QuickShareService.available ? Theme.primary : Theme.surfaceVariantText)
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }
     }
-
-    // Main Popout Widget
-    popoutContent: Component {
 
     FileBrowserSurfaceModal {
         id: fileBrowser
@@ -330,27 +268,29 @@ PluginComponent {
         }
     }
 
+    // Main Popout Widget
+    popoutContent: Component {
         PopoutComponent {
             id: popoutColumn
 
             headerText: "Quick Share"
-            detailsText: root.daemonRunning ? "Share with nearby devices (Drag & Drop files here)" : "Daemon not running! Please install dms-quickshare-daemon."
+            detailsText: QuickShareService.available ? "Share with nearby devices (Drag & Drop files here)" : "Daemon not running! Please install dms-quickshare-daemon."
             showCloseButton: true
 
             Item {
                 width: parent.width
                 implicitHeight: root.popoutHeight - popoutColumn.headerHeight - popoutColumn.detailsHeight - Theme.spacingXL
 
-                Column {
+                ColumnLayout {
                     anchors.fill: parent
                     anchors.margins: Theme.spacingM
                     spacing: Theme.spacingM
 
                     // --- ACTIVE TRANSFERS SECTION ---
-                    Column {
-                        width: parent.width
+                    ColumnLayout {
+                        Layout.fillWidth: true
                         spacing: Theme.spacingS
-                        visible: root.activeTransfers.length > 0
+                        visible: root.activeTransfersModel.count > 0
 
                         StyledText {
                             text: "Active Transfers"
@@ -360,65 +300,20 @@ PluginComponent {
                         }
 
                         Repeater {
-                            model: root.activeTransfers
-                            
-                            StyledRect {
-                                width: parent.width
-                                height: 60
-                                radius: Theme.cornerRadius
-                                color: Theme.surfaceContainerHighest
-                                
-                                Column {
-                                    anchors.fill: parent
-                                    anchors.margins: Theme.spacingM
-                                    spacing: Theme.spacingS
-
-                                    Row {
-                                        width: parent.width
-                                        
-                                        StyledText {
-                                            text: modelData.state === "ReceivingFiles" ? "Receiving..." : "Sending..."
-                                            font.pixelSize: Theme.fontSizeMedium
-                                            color: Theme.surfaceText
-                                        }
-                                        
-                                        Item { Layout.fillWidth: true }
-                                        
-                                        StyledText {
-                                            text: modelData.bytesStr
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            color: Theme.surfaceVariantText
-                                        }
-                                    }
-
-                                    // Simple progress bar
-                                    Rectangle {
-                                        width: parent.width
-                                        height: 4
-                                        radius: 2
-                                        color: Theme.surfaceVariant
-                                        
-                                        Rectangle {
-                                            height: parent.height
-                                            width: parent.width * modelData.progress
-                                            radius: 2
-                                            color: Theme.primary
-                                            
-                                            Behavior on width {
-                                                NumberAnimation { duration: 200 }
-                                            }
-                                        }
-                                    }
-                                }
+                            model: root.activeTransfersModel
+                            delegate: TransferCard {
+                                state: model.state
+                                progress: model.progress
+                                bytesStr: model.bytesStr
                             }
                         }
                     }
 
                     // --- INCOMING TRANSFERS SECTION ---
-                    Column {
-                        width: parent.width
+                    ColumnLayout {
+                        Layout.fillWidth: true
                         spacing: Theme.spacingS
-                        visible: root.pendingTransfers.length > 0
+                        visible: root.pendingTransfersModel.count > 0
 
                         StyledText {
                             text: "Incoming Requests"
@@ -428,111 +323,40 @@ PluginComponent {
                         }
 
                         Repeater {
-                            model: root.pendingTransfers
-                            
-                            StyledRect {
-                                width: parent.width
-                                height: 80
-                                radius: Theme.cornerRadius
-                                color: Theme.surfaceContainerHighest
-                                
-                                Column {
-                                    anchors.fill: parent
-                                    anchors.margins: Theme.spacingS
-                                    spacing: 4
-
-                                    StyledText {
-                                        text: modelData.deviceName + " is sending a file"
-                                        font.pixelSize: Theme.fontSizeMedium
-                                        color: Theme.surfaceText
-                                    }
-                                    
-                                    StyledText {
-                                        text: modelData.pin !== "" ? "PIN: " + modelData.pin : ""
-                                        font.pixelSize: Theme.fontSizeSmall
-                                        color: Theme.surfaceVariantText
-                                        visible: modelData.pin !== ""
-                                    }
-
-                                    Row {
-                                        spacing: Theme.spacingS
-                                        
-                                        StyledButton {
-                                            text: "Accept"
-                                            type: "primary"
-                                            height: 30
-                                            onClicked: {
-                                                Quickshell.execDetached([
-                                                    "dbus-send", "--session", "--type=method_call", 
-                                                    "--dest=org.danklinux.QuickShare", 
-                                                    "/org/danklinux/QuickShare", 
-                                                    "org.danklinux.QuickShare.AcceptTransfer", 
-                                                    "string:" + modelData.id
-                                                ]);
-                                                // Optimistically remove from pending to avoid flicker
-                                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== modelData.id);
-                                            }
-                                        }
-
-                                        StyledButton {
-                                            text: "Reject"
-                                            type: "secondary"
-                                            height: 30
-                                            onClicked: {
-                                                Quickshell.execDetached([
-                                                    "dbus-send", "--session", "--type=method_call", 
-                                                    "--dest=org.danklinux.QuickShare", 
-                                                    "/org/danklinux/QuickShare", 
-                                                    "org.danklinux.QuickShare.RejectTransfer", 
-                                                    "string:" + modelData.id
-                                                ]);
-                                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== modelData.id);
-                                            }
-                                        }
-                                    }
+                            model: root.pendingTransfersModel
+                            delegate: IncomingRequestCard {
+                                transferId: model.id
+                                deviceName: model.deviceName
+                                pin: model.pin
+                                onRequestHandled: (tId) => {
+                                    root.removePendingTransfer(tId);
                                 }
                             }
                         }
                     }
 
                     // --- OUTBOUND SECTION ---
-                    Row {
-                        width: parent.width
+                    RowLayout {
+                        Layout.fillWidth: true
                         spacing: Theme.spacingM
-                        opacity: root.daemonRunning ? 1.0 : 0.5
-                        enabled: root.daemonRunning
+                        opacity: QuickShareService.available ? 1.0 : 0.5
+                        enabled: QuickShareService.available
 
                         StyledButton {
-                            text: root.isScanning ? "Scanning..." : "Scan for Devices"
+                            text: QuickShareService.isScanning ? "Scanning..." : "Scan for Devices"
                             icon: "search"
-                            width: (parent.width - Theme.spacingM) / 2
-                            type: root.isScanning ? "secondary" : "primary"
+                            Layout.fillWidth: true
+                            type: QuickShareService.isScanning ? "secondary" : "primary"
                             onClicked: {
-                                root.isScanning = true;
-                                root.mockDevices = [];
-                                
-                                Quickshell.execDetached([
-                                    "dbus-send", "--session", "--type=method_call", 
-                                    "--dest=org.danklinux.QuickShare", "/org/danklinux/QuickShare", 
-                                    "org.danklinux.QuickShare.StartDiscovery"
-                                ]);
-
-                                Timer {
-                                    interval: 15000; running: true; repeat: false
-                                    onTriggered: {
-                                        root.isScanning = false;
-                                        if (root.mockDevices.length === 0) {
-                                            ToastService.showInfo("Quick Share", "No devices found nearby.")
-                                        }
-                                    }
-                                }
+                                root.mockDevicesModel.clear();
+                                QuickShareService.startDiscovery();
                             }
                         }
 
                         StyledButton {
                             text: "Select File"
                             icon: "folder"
-                            width: (parent.width - Theme.spacingM) / 2
+                            Layout.fillWidth: true
                             type: "secondary"
                             onClicked: {
                                 fileBrowser.open()
@@ -545,74 +369,36 @@ PluginComponent {
                         font.pixelSize: Theme.fontSizeMedium
                         font.weight: Font.Bold
                         color: Theme.surfaceText
-                        visible: (root.mockDevices.length > 0 || root.isScanning) && root.daemonRunning
+                        visible: (root.mockDevicesModel.count > 0 || QuickShareService.isScanning) && QuickShareService.available
                     }
 
                     ListView {
-                        width: parent.width
-                        // Adjust height dynamically based on active transfers
-                        height: parent.height - 180 - (root.activeTransfers.length * 70) - (root.pendingTransfers.length * 90)
-                        model: root.mockDevices
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true // Let QML handle the height automatically now
+                        model: root.mockDevicesModel
                         spacing: Theme.spacingS
+                        clip: true
 
-                        delegate: StyledRect {
-                            width: parent.width
-                            height: 60
-                            radius: Theme.cornerRadius
-                            color: Theme.surfaceContainerHighest
+                        delegate: DeviceCard {
+                            deviceId: model.id
+                            deviceName: model.name
+                            ip: model.ip
+                            deviceType: model.type
                             
-                            Row {
-                                anchors.fill: parent
-                                anchors.margins: Theme.spacingM
-                                spacing: Theme.spacingM
-
-                                DankIcon {
-                                    name: modelData.type === "phone" ? "smartphone" : "tablet_mac"
-                                    size: Theme.iconSizeLarge
-                                    color: Theme.primary
-                                    anchors.verticalCenter: parent.verticalCenter
+                            onClicked: {
+                                const selectedFiles = root.pluginService.loadPluginState(root.pluginId, "selectedFiles", []);
+                                if (!selectedFiles || selectedFiles.length === 0) {
+                                    ToastService.showError("Quick Share", "Please select a file first using the 'Select File' button or drag and drop a file.");
+                                    return;
                                 }
-
-                                StyledText {
-                                    text: modelData.name
-                                    font.pixelSize: Theme.fontSizeMedium
-                                    color: Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-
-                                Item { Layout.fillWidth: true } // Spacer
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    const selectedFiles = root.pluginService.loadPluginState(root.pluginId, "selectedFiles", []);
-                                    if (!selectedFiles || selectedFiles.length === 0) {
-                                        ToastService.showError("Quick Share", "Please select a file first using the 'Select File' button or drag and drop a file.");
-                                        return;
-                                    }
-                                    
-                                    ToastService.showInfo("Quick Share", "Sending " + selectedFiles.length + " file(s) to " + modelData.name + "...");
-                                    
-                                    let filesArray = "['" + selectedFiles.join("', '") + "']";
-                                    let gdbusCmd = [
-                                        "gdbus", "call", "--session", 
-                                        "--dest", "org.danklinux.QuickShare", 
-                                        "--object-path", "/org/danklinux/QuickShare", 
-                                        "--method", "org.danklinux.QuickShare.SendFiles", 
-                                        "'" + modelData.id + "'", 
-                                        "'" + modelData.name + "'", 
-                                        "'" + modelData.ip + "'", 
-                                        filesArray
-                                    ];
-                                    
-                                    Quickshell.execDetached(["bash", "-c", gdbusCmd.join(" ")]);
-                                }
+                                
+                                ToastService.showInfo("Quick Share", "Sending " + selectedFiles.length + " file(s) to " + model.name + "...");
+                                QuickShareService.sendFiles(model.id, model.name, model.ip, selectedFiles);
                             }
                         }
                     }
+                    
+                    Item { Layout.fillHeight: true } // Fills remaining space
                 }
             }
         }

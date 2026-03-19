@@ -16,6 +16,7 @@ PluginComponent {
     property bool isScanning: false
     property var mockDevices: []
     property var pendingTransfers: [] // Queue of incoming transfers waiting for accept/reject
+    property var activeTransfers: [] // Ongoing transfers with progress
     property bool daemonRunning: false
 
     // Control Center capability
@@ -141,13 +142,42 @@ PluginComponent {
                     if (response && response.result) {
                         const id = response.result.arguments[0];
                         const state = response.result.arguments[1];
+                        const bytesAck = response.result.arguments[2] || 0;
+                        const bytesTotal = response.result.arguments[3] || 0;
                         
-                        if (state === "Completed") {
-                            ToastService.showInfo("Quick Share", "Transfer completed!");
+                        // Manage active transfers
+                        if (state === "ReceivingFiles" || state === "SendingFiles") {
+                            let ongoing = root.activeTransfers.slice();
+                            let existingIdx = ongoing.findIndex(t => t.id === id);
+                            
+                            let progress = bytesTotal > 0 ? (bytesAck / bytesTotal) : 0;
+                            
+                            if (existingIdx !== -1) {
+                                ongoing[existingIdx].progress = progress;
+                                ongoing[existingIdx].state = state;
+                                ongoing[existingIdx].bytesStr = Math.round(bytesAck / 1024 / 1024) + " / " + Math.round(bytesTotal / 1024 / 1024) + " MB";
+                            } else {
+                                ongoing.push({
+                                    id: id,
+                                    state: state,
+                                    progress: progress,
+                                    bytesStr: "Starting..."
+                                });
+                            }
+                            root.activeTransfers = ongoing;
+                        }
+                        
+                        if (state === "Finished") {
+                            ToastService.showInfo("Quick Share", "Transfer completed successfully!");
                             root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
-                        } else if (state === "Rejected" || state === "Cancelled" || state === "Failed") {
-                            ToastService.showError("Quick Share", "Transfer " + state.toLowerCase());
+                            root.activeTransfers = root.activeTransfers.filter(t => t.id !== id);
+                        } else if (state === "Rejected" || state === "Cancelled" || state === "Disconnected") {
+                            // Only show error if it was actually transferring or pending
+                            if (root.pendingTransfers.some(t => t.id === id) || root.activeTransfers.some(t => t.id === id)) {
+                                ToastService.showError("Quick Share", "Transfer " + state.toLowerCase());
+                            }
                             root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== id);
+                            root.activeTransfers = root.activeTransfers.filter(t => t.id !== id);
                         }
                     }
                 }
@@ -168,14 +198,14 @@ PluginComponent {
             spacing: Theme.spacingS
 
             DankIcon {
-                name: root.pendingTransfers.length > 0 ? "downloading" : "share"
+                name: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? "downloading" : "share"
                 size: root.iconSize
-                color: root.pendingTransfers.length > 0 ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
+                color: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
                 anchors.verticalCenter: parent.verticalCenter
             }
 
             StyledText {
-                text: root.pendingTransfers.length > 0 ? "Incoming" : "Share"
+                text: root.activeTransfers.length > 0 ? "Transferring" : (root.pendingTransfers.length > 0 ? "Incoming" : "Share")
                 font.pixelSize: Theme.fontSizeSmall
                 color: root.isEnabled && root.daemonRunning ? Theme.surfaceText : Theme.surfaceVariantText
                 anchors.verticalCenter: parent.verticalCenter
@@ -189,9 +219,9 @@ PluginComponent {
             spacing: Theme.spacingXS
 
             DankIcon {
-                name: root.pendingTransfers.length > 0 ? "downloading" : "share"
+                name: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? "downloading" : "share"
                 size: root.iconSize
-                color: root.pendingTransfers.length > 0 ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
+                color: (root.pendingTransfers.length > 0 || root.activeTransfers.length > 0) ? Theme.success : (root.isEnabled && root.daemonRunning ? Theme.primary : Theme.surfaceVariantText)
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }
@@ -215,6 +245,74 @@ PluginComponent {
                     anchors.margins: Theme.spacingM
                     spacing: Theme.spacingM
 
+                    // --- ACTIVE TRANSFERS SECTION ---
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spacingS
+                        visible: root.activeTransfers.length > 0
+
+                        StyledText {
+                            text: "Active Transfers"
+                            font.pixelSize: Theme.fontSizeMedium
+                            font.weight: Font.Bold
+                            color: Theme.primary
+                        }
+
+                        Repeater {
+                            model: root.activeTransfers
+                            
+                            StyledRect {
+                                width: parent.width
+                                height: 60
+                                radius: Theme.cornerRadius
+                                color: Theme.surfaceContainerHighest
+                                
+                                Column {
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spacingM
+                                    spacing: Theme.spacingS
+
+                                    Row {
+                                        width: parent.width
+                                        
+                                        StyledText {
+                                            text: modelData.state === "ReceivingFiles" ? "Receiving..." : "Sending..."
+                                            font.pixelSize: Theme.fontSizeMedium
+                                            color: Theme.surfaceText
+                                        }
+                                        
+                                        Item { Layout.fillWidth: true }
+                                        
+                                        StyledText {
+                                            text: modelData.bytesStr
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            color: Theme.surfaceVariantText
+                                        }
+                                    }
+
+                                    // Simple progress bar
+                                    Rectangle {
+                                        width: parent.width
+                                        height: 4
+                                        radius: 2
+                                        color: Theme.surfaceVariant
+                                        
+                                        Rectangle {
+                                            height: parent.height
+                                            width: parent.width * modelData.progress
+                                            radius: 2
+                                            color: Theme.primary
+                                            
+                                            Behavior on width {
+                                                NumberAnimation { duration: 200 }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // --- INCOMING TRANSFERS SECTION ---
                     Column {
                         width: parent.width
@@ -222,7 +320,7 @@ PluginComponent {
                         visible: root.pendingTransfers.length > 0
 
                         StyledText {
-                            text: "Incoming Transfers"
+                            text: "Incoming Requests"
                             font.pixelSize: Theme.fontSizeMedium
                             font.weight: Font.Bold
                             color: Theme.success
@@ -270,6 +368,8 @@ PluginComponent {
                                                     "org.danklinux.QuickShare.AcceptTransfer", 
                                                     "string:" + modelData.id
                                                 ]);
+                                                // Optimistically remove from pending to avoid flicker
+                                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== modelData.id);
                                             }
                                         }
 
@@ -285,6 +385,7 @@ PluginComponent {
                                                     "org.danklinux.QuickShare.RejectTransfer", 
                                                     "string:" + modelData.id
                                                 ]);
+                                                root.pendingTransfers = root.pendingTransfers.filter(t => t.id !== modelData.id);
                                             }
                                         }
                                     }
@@ -354,7 +455,8 @@ PluginComponent {
 
                     ListView {
                         width: parent.width
-                        height: parent.height - 180
+                        // Adjust height dynamically based on active transfers
+                        height: parent.height - 180 - (root.activeTransfers.length * 70) - (root.pendingTransfers.length * 90)
                         model: root.mockDevices
                         spacing: Theme.spacingS
 

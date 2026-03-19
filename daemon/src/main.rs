@@ -7,6 +7,7 @@ use rqs_lib::{
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use zbus::{connection::Builder, interface, SignalContext};
+use std::path::PathBuf;
 
 // The state our D-Bus interface will manipulate
 struct QuickShareDaemon {
@@ -126,7 +127,7 @@ impl QuickShareDaemon {
     async fn transfer_requested(ctxt: &SignalContext<'_>, id: &str, device_name: &str, pin: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
-    async fn transfer_progress(ctxt: &SignalContext<'_>, id: &str, state: &str) -> zbus::Result<()>;
+    async fn transfer_progress(ctxt: &SignalContext<'_>, id: &str, state: &str, bytes_transferred: u64, total_bytes: u64) -> zbus::Result<()>;
 }
 
 #[tokio::main]
@@ -134,7 +135,14 @@ async fn main() -> Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     info!("Starting DMS Quick Share Daemon");
 
-    let mut rqs = RQS::new(Visibility::Invisible, None, None);
+    // Set default download path to XDG_DOWNLOAD_DIR or fallback to ~/Downloads
+    let download_dir = dirs::download_dir().unwrap_or_else(|| {
+        dirs::home_dir().map(|h| h.join("Downloads")).unwrap_or_else(|| PathBuf::from("/tmp"))
+    });
+    info!("Incoming files will be saved to: {:?}", download_dir);
+
+    // Initialize RQS with the custom download path
+    let mut rqs = RQS::new(Visibility::Invisible, None, Some(download_dir));
     
     // The channel we listen on for incoming messages from the lib (like transfer requests)
     let mut msg_receiver = rqs.message_sender.subscribe();
@@ -163,17 +171,25 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         while let Ok(msg) = msg_receiver.recv().await {
             if msg.direction == ChannelDirection::LibToFront {
-                // Determine if it's inbound or outbound
                 let is_inbound = msg.rtype == Some(TransferType::Inbound);
+                
+                // Extract progress info if available
+                let mut total_bytes = 0;
+                let mut ack_bytes = 0;
+                if let Some(ref meta) = msg.meta {
+                    total_bytes = meta.total_bytes;
+                    ack_bytes = meta.ack_bytes;
+                }
                 
                 if let Some(state) = msg.state {
                     let state_str = format!("{:?}", state);
                     trace!("Transfer {} state changed: {}", msg.id, state_str);
                     
-                    let _ = QuickShareDaemon::transfer_progress(&signal_context, &msg.id, &state_str).await;
+                    // Always emit progress update so UI can update progress bars
+                    let _ = QuickShareDaemon::transfer_progress(&signal_context, &msg.id, &state_str, ack_bytes, total_bytes).await;
 
                     // If it's a new inbound request waiting for acceptance
-                    if is_inbound && state_str == "Request" {
+                    if is_inbound && state_str == "WaitingForUserConsent" {
                         let device_name = msg.meta.as_ref()
                             .and_then(|m| m.source.as_ref())
                             .and_then(|s| Some(s.name.clone()))

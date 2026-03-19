@@ -10,25 +10,34 @@ A native Quick Share (Nearby Share) integration for DankMaterialShell. It allows
 - **Native D-Bus Daemon:** Runs a lightweight Rust background process built on top of `rquickshare` for reliable, low-latency device discovery and transfers. Files are automatically saved to your `~/Downloads` folder.
 
 ## Architecture
-
-This plugin follows the same architectural pattern as `DankKDEConnect`. It consists of two parts:
-1. **The QML Frontend:** The beautiful UI that lives in your DankBar and Control Center.
-2. **The Rust Daemon (`dms-quickshare-daemon`):** A headless D-Bus service that handles the actual Quick Share protocol (mDNS, Bluetooth LE, and TCP transfers).
+This plugin works on **any Wayland compositor** (Hyprland, Niri, Sway, etc.) because it relies entirely on native Linux protocols. 
+It consists of two parts:
+1. **The QML Frontend:** The UI that lives in your DankBar and Control Center.
+2. **The Rust Daemon (`dms-quickshare-daemon`):** A headless D-Bus service that handles the actual Quick Share protocol (mDNS, Bluetooth LE, and TCP transfers). The plugin will automatically start this daemon in the background.
 
 ## Installation
 
-### 1. Install the Daemon
-Before the plugin can work, you need to compile and install the Rust daemon. Ensure you have Rust and Cargo installed (`rustup`).
+Because the Quick Share protocol requires compiling a native Rust daemon and needs Bluetooth, we provide a simple installer script.
 
-```bash
-cd daemon
-cargo build --release
-# Move the binary to a folder in your PATH (e.g. /usr/local/bin)
-sudo cp target/release/dms-quickshare-daemon /usr/local/bin/
-```
+1. Clone or download this plugin to your `~/.config/DankMaterialShell/plugins/` folder.
+2. Navigate into the plugin folder:
+   ```bash
+   cd ~/.config/DankMaterialShell/plugins/DankQuickShare
+   ```
+3. Run the installer script:
+   ```bash
+   ./install.sh
+   ```
+   *This script will verify you have the required dependencies (`cargo`, `zenity`, `libnotify`, `bluez`) and compile the daemon into `~/.local/bin/`.*
 
-### 2. Enable the Plugin
-Open your DankMaterialShell Settings, navigate to the **Plugins** tab, click "Scan for Plugins", and toggle **Quick Share** on.
+4. Open your DankMaterialShell Settings, navigate to the **Plugins** tab, click "Scan for Plugins", and toggle **Quick Share** on.
+
+### Manual Dependencies (If the script fails)
+If you prefer to install things manually, ensure you have:
+- `rustup` / `cargo` (to compile the daemon)
+- `zenity` (for the file picker)
+- `libnotify` (for interactive desktop notifications)
+- `bluez` and `avahi` (for Bluetooth LE and mDNS discovery)
 
 ## Submitting to the Plugin Browser
 To add this plugin to your DMS environment using the Plugin Browser:

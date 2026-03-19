@@ -3,6 +3,7 @@ import qs.Common
 import qs.Services
 import qs.Widgets
 import qs.Modules.Plugins
+import qs.Modals.FileBrowser
 import Quickshell
 import Quickshell.Io
 
@@ -311,6 +312,24 @@ PluginComponent {
 
     // Main Popout Widget
     popoutContent: Component {
+
+    FileBrowserSurfaceModal {
+        id: fileBrowser
+
+        browserTitle: "Select File to Send"
+        browserIcon: "upload_file"
+        browserType: "generic"
+        showHiddenFiles: false
+        fileExtensions: ["*"]
+        parentPopout: popoutColumn
+
+        onFileSelected: path => {
+            const files = [path];
+            root.pluginService.savePluginState(root.pluginId, "selectedFiles", files);
+            ToastService.showInfo("Quick Share", "1 file selected. Tap a device to send.");
+        }
+    }
+
         PopoutComponent {
             id: popoutColumn
 
@@ -516,13 +535,7 @@ PluginComponent {
                             width: (parent.width - Theme.spacingM) / 2
                             type: "secondary"
                             onClicked: {
-                                Quickshell.exec(["zenity", "--file-selection", "--multiple", "--title=Select files to send"], function(output, err, exitCode) {
-                                    if (exitCode === 0 && output.trim() !== "") {
-                                        const files = output.trim().split("|");
-                                        root.pluginService.savePluginState(root.pluginId, "selectedFiles", files);
-                                        ToastService.showInfo("Quick Share", files.length + " file(s) selected. Tap a device to send.");
-                                    }
-                                });
+                                fileBrowser.open()
                             }
                         }
                     }

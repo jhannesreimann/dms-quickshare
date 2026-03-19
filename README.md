@@ -52,7 +52,7 @@ To add this plugin to your DMS environment using the Plugin Browser:
     "repo": "https://github.com/yourname/dms-quickshare",
     "author": "noaa",
     "description": "Send and receive files seamlessly across nearby devices using Quick Share.",
-    "dependencies": ["dms-quickshare-daemon", "zenity", "libnotify"],
+    "dependencies": ["dms-quickshare-daemon", "libnotify"],
     "compositors": ["any"],
     "distro": ["any"],
     "screenshot": "https://raw.githubusercontent.com/yourname/dms-quickshare/main/screenshot.png"

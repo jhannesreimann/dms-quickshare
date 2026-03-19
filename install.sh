@@ -11,15 +11,15 @@ echo "Checking system dependencies..."
 DEPS_MISSING=0
 
 command -v notify-send >/dev/null 2>&1 || { echo >&2 "Missing 'notify-send' (usually part of libnotify or libnotify-bin)."; DEPS_MISSING=1; }
-command -v zenity >/dev/null 2>&1 || { echo >&2 "Missing 'zenity' (used for file selection dialogs)."; DEPS_MISSING=1; }
+command -v >/dev/null 2>&1 || { echo >&2 "Missing 'zenity' (used for file selection dialogs)."; DEPS_MISSING=1; }
 command -v cargo >/dev/null 2>&1 || { echo >&2 "Missing 'cargo' (Rust compiler). Please install rustup: https://rustup.rs/"; DEPS_MISSING=1; }
 command -v bluetoothctl >/dev/null 2>&1 || { echo >&2 "Missing 'bluetoothctl' (bluez). Quick Share requires Bluetooth LE."; DEPS_MISSING=1; }
 
 if [ $DEPS_MISSING -eq 1 ]; then
     echo ""
     echo "Please install the missing dependencies using your package manager."
-    echo "Ubuntu/Fedora: sudo apt/dnf install libnotify-bin zenity bluez cargo"
-    echo "Arch Linux: sudo pacman -S libnotify zenity bluez rust"
+    echo "Ubuntu/Fedora: sudo apt/dnf install libnotify-bin bluez cargo"
+    echo "Arch Linux: sudo pacman -S libnotify bluez rust"
     exit 1
 fi
 

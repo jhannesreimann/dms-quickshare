@@ -28,14 +28,13 @@ Because the Quick Share protocol requires compiling a native Rust daemon and nee
    ```bash
    ./install.sh
    ```
-   *This script will verify you have the required dependencies (`cargo`, `zenity`, `libnotify`, `bluez`) and compile the daemon into `~/.local/bin/`.*
+   *This script will verify you have the required dependencies (`cargo`, `libnotify`, `bluez`) and compile the daemon into `~/.local/bin/`.*
 
 4. Open your DankMaterialShell Settings, navigate to the **Plugins** tab, click "Scan for Plugins", and toggle **Quick Share** on.
 
 ### Manual Dependencies (If the script fails)
 If you prefer to install things manually, ensure you have:
 - `rustup` / `cargo` (to compile the daemon)
-- `zenity` (for the file picker)
 - `libnotify` (for interactive desktop notifications)
 - `bluez` and `avahi` (for Bluetooth LE and mDNS discovery)
 
